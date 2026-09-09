@@ -19,7 +19,15 @@ DATABASE_URL = os.getenv('DATABASE_URL') or os.getenv('POSTGRES_URL')
 UPLOADS = ROOT / 'uploads'
 UPLOADS.mkdir(exist_ok=True)
 app = FastAPI(title='Northstar Studio API', version='1.0.0')
-app.add_middleware(CORSMiddleware, allow_origin_regex=r'^https?://(localhost|127\.0\.0\.1)(:\d+)?$', allow_methods=['*'], allow_headers=['*'])
+frontend_origin = os.getenv('FRONTEND_ORIGIN', '').strip().rstrip('/')
+allowed_origins = [frontend_origin] if frontend_origin else []
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_origin_regex=r'^https://[a-zA-Z0-9-]+\.vercel\.app$|^https?://(localhost|127\.0\.0\.1)(:\d+)?$',
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
 app.mount('/uploads', StaticFiles(directory=UPLOADS), name='uploads')
 admin_tokens = set()
 

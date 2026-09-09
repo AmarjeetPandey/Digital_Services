@@ -19,7 +19,7 @@ const testimonials = [
   { quote: 'Northstar helped us turn a messy idea into the clearest product in our category.', name: 'Maya Chen', role: 'Founder, Rill' },
   { quote: 'They ask the right questions, move quickly, and care about the last 10 percent.', name: 'Arjun Mehta', role: 'COO, Atlas' }
 ];
-const API = 'http://localhost:8000';
+const API = (import.meta.env.VITE_API_URL || 'https://digital-servicesba.onrender.com').replace(/\/$/, '');
 const socialLinks = {
   whatsapp: 'https://wa.me/919299495969',
   instagram: 'https://instagram.com/your_username',
