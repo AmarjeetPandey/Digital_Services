@@ -1,0 +1,1 @@
+.phoneField{display:grid;grid-template-columns:120px 1fr;gap:10px}.phoneField select{background:transparent;border:0;border-bottom:1px solid #aeb7ae;padding:13px 0;font:16px inherit;color:var(--ink);outline:none}@media(max-width:800px){.phoneField{grid-template-columns:105px 1fr}}
