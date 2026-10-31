@@ -22,12 +22,16 @@ pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 ```
 
-The API uses PostgreSQL for all persistent data. Copy `backend/.env.example` to `backend/.env` and paste your Neon connection string after `DATABASE_URL=`. Every admin add, edit, and delete action is committed directly to this database, and the public pages read from the same database.
+The API uses four separate PostgreSQL databases: `content`, `inquiries`, `applications`, and `certificates`. Create one database for each in your PostgreSQL provider, then set `CONTENT_DATABASE_URL`, `INQUIRIES_DATABASE_URL`, `APPLICATIONS_DATABASE_URL`, and `CERTIFICATES_DATABASE_URL` in the backend deployment environment. Each URL must point to a different database. The API creates the required tables on startup and adds starter website content only when the content database is empty.
 
 ```powershell
 Copy-Item backend/.env.example backend/.env
-# Open backend/.env and replace the example value with your Neon connection string.
+# Replace each example URL with that database's connection string.
 ```
+
+For online deployment, configure the same four variables in the backend host's environment settings. Do not commit real connection strings. The previous single-database `DATABASE_URL` is no longer used; keep its database untouched as a backup until the new deployment has been verified. New databases start with fresh records, except for the website's starter content, default enquiry fields, and demo certificate.
+
+The app does not drop tables or erase records on startup. To do a clean cutover, create the four databases first, set the backend variables, deploy, and check `/api/health` and the admin portal before removing the old database from your provider.
 
 Client inquiries are stored in the admin portal. For local development, the default admin credentials are `admin@gmail.com` / `900AB`. You can override them before starting the backend:
 

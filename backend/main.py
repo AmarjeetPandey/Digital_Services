@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
-from fastapi import FastAPI, Form, Header, Request, UploadFile, File
+from fastapi import FastAPI, Form, Header, Query, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -16,7 +16,12 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / '.env')
-DATABASE_URL = os.getenv('DATABASE_URL') or os.getenv('POSTGRES_URL')
+DATABASE_URLS = {
+    'content': os.getenv('CONTENT_DATABASE_URL'),
+    'inquiries': os.getenv('INQUIRIES_DATABASE_URL'),
+    'applications': os.getenv('APPLICATIONS_DATABASE_URL'),
+    'certificates': os.getenv('CERTIFICATES_DATABASE_URL'),
+}
 UPLOADS = ROOT / 'uploads'
 UPLOADS.mkdir(exist_ok=True)
 app = FastAPI(title='Northstar Studio API', version='1.0.0')
@@ -47,10 +52,12 @@ class ResultCursor:
         return iter(self.cursor)
 
 class Database:
-    def __init__(self):
-        if not DATABASE_URL:
-            raise RuntimeError('DATABASE_URL must point to an online PostgreSQL database')
-        self.raw = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    def __init__(self, database_name):
+        database_url = DATABASE_URLS.get(database_name)
+        if not database_url:
+            variable_name = f'{database_name.upper()}_DATABASE_URL'
+            raise RuntimeError(f'{variable_name} must point to a PostgreSQL database')
+        self.raw = psycopg.connect(database_url, row_factory=dict_row)
 
     def __enter__(self):
         return self
@@ -81,28 +88,46 @@ class Database:
     def rollback(self):
         self.raw.rollback()
 
-def connection():
-    return Database()
+def connection(database_name):
+    return Database(database_name)
+
+def validate_database_configuration():
+    identities = {}
+    for name, database_url in DATABASE_URLS.items():
+        if not database_url:
+            raise RuntimeError(f'{name.upper()}_DATABASE_URL must point to its own PostgreSQL database')
+        try:
+            parsed = urlsplit(database_url)
+            identity = (parsed.hostname.casefold() if parsed.hostname else None, parsed.port or 5432, parsed.path)
+        except ValueError as error:
+            raise RuntimeError(f'{name.upper()}_DATABASE_URL is not a valid PostgreSQL connection URL') from error
+        if parsed.scheme not in {'postgres', 'postgresql'} or not parsed.hostname or not parsed.path or identity in identities:
+            other_name = identities.get(identity)
+            if other_name:
+                raise RuntimeError(f'{name.upper()}_DATABASE_URL and {other_name.upper()}_DATABASE_URL must use different databases')
+            raise RuntimeError(f'{name.upper()}_DATABASE_URL is not a valid PostgreSQL connection URL')
+        identities[identity] = name
 
 def init_db():
-    with connection() as db:
-        tables = {name: bool(db.execute('SELECT to_regclass(?) AS table_name', (f'public.{name}',)).fetchone()['table_name']) for name in ('inquiries', 'internship_applications', 'inquiry_fields', 'certificates', 'content')}
-        if not tables['inquiries']:
-            db.execute('CREATE TABLE inquiries (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, service TEXT, details TEXT, status TEXT DEFAULT \'new\', created_at TEXT NOT NULL, extra_fields TEXT DEFAULT \'{}\')')
-        if not tables['internship_applications']:
-            db.execute('CREATE TABLE internship_applications (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, category TEXT, status TEXT DEFAULT \'pending\', created_at TEXT NOT NULL)')
-        db.execute('ALTER TABLE internship_applications ADD COLUMN IF NOT EXISTS resume TEXT')
-        if not tables['inquiry_fields']:
-            db.execute('CREATE TABLE inquiry_fields (id BIGSERIAL PRIMARY KEY, label TEXT NOT NULL, field_name TEXT UNIQUE NOT NULL, field_type TEXT NOT NULL DEFAULT \'text\', required INTEGER NOT NULL DEFAULT 0, options TEXT DEFAULT \'[]\', created_at TEXT NOT NULL)')
-        if not tables['certificates']:
-            db.execute('CREATE TABLE certificates (id BIGSERIAL PRIMARY KEY, number TEXT UNIQUE NOT NULL, candidate TEXT NOT NULL, category TEXT NOT NULL, duration TEXT NOT NULL, issue_date TEXT NOT NULL)')
-        db.execute('ALTER TABLE certificates ADD COLUMN IF NOT EXISTS image TEXT')
-        if not tables['content']:
-            db.execute('CREATE TABLE content (id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL)')
-        db.execute('INSERT INTO certificates(number,candidate,category,duration,issue_date) VALUES (?,?,?,?,?) ON CONFLICT (number) DO NOTHING', ('NS-2026-041','Aarav Sharma','Full Stack Development','January - April 2026','2026-04-30'))
+    validate_database_configuration()
+    with connection('inquiries') as db:
+        db.execute('CREATE TABLE IF NOT EXISTS inquiries (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, service TEXT, details TEXT, status TEXT DEFAULT \'new\', created_at TEXT NOT NULL, extra_fields TEXT DEFAULT \'{}\')')
+        db.execute('CREATE TABLE IF NOT EXISTS inquiry_fields (id BIGSERIAL PRIMARY KEY, label TEXT NOT NULL, field_name TEXT UNIQUE NOT NULL, field_type TEXT NOT NULL DEFAULT \'text\', required INTEGER NOT NULL DEFAULT 0, options TEXT DEFAULT \'[]\', created_at TEXT NOT NULL)')
         if db.execute('SELECT COUNT(*) AS count FROM inquiry_fields').fetchone()['count'] == 0:
             default_fields = [('Company name', 'company_name', 'text', 0), ('Budget range', 'budget', 'text', 0), ('Project timeline', 'timeline', 'text', 0)]
             db.executemany('INSERT INTO inquiry_fields(label,field_name,field_type,required,created_at) VALUES(?,?,?,?,?)', [(label, name, kind, required, datetime.now().isoformat(timespec='seconds')) for label, name, kind, required in default_fields])
+
+    with connection('applications') as db:
+        db.execute('CREATE TABLE IF NOT EXISTS internship_applications (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL, category TEXT, status TEXT DEFAULT \'pending\', created_at TEXT NOT NULL)')
+        db.execute('ALTER TABLE internship_applications ADD COLUMN IF NOT EXISTS resume TEXT')
+
+    with connection('certificates') as db:
+        db.execute('CREATE TABLE IF NOT EXISTS certificates (id BIGSERIAL PRIMARY KEY, number TEXT UNIQUE NOT NULL, candidate TEXT NOT NULL, category TEXT NOT NULL, duration TEXT NOT NULL, issue_date TEXT NOT NULL)')
+        db.execute('ALTER TABLE certificates ADD COLUMN IF NOT EXISTS image TEXT')
+        db.execute('INSERT INTO certificates(number,candidate,category,duration,issue_date) VALUES (?,?,?,?,?) ON CONFLICT (number) DO NOTHING', ('NS-2026-041','Aarav Sharma','Full Stack Development','January - April 2026','2026-04-30'))
+
+    with connection('content') as db:
+        db.execute('CREATE TABLE IF NOT EXISTS content (id BIGSERIAL PRIMARY KEY, kind TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL)')
         if db.execute('SELECT COUNT(*) AS count FROM content').fetchone()['count'] == 0:
             default_content = [
                 ('services', {'icon': '01', 'title': 'Websites that work hard', 'text': 'High-converting digital homes with a sharp point of view and effortless performance.', 'tags': ['Strategy', 'Design systems', 'Development']}),
@@ -114,14 +139,9 @@ def init_db():
                 *[('internships', {'title': title, 'text': '12-week paid placement'}) for title in ['React Development', 'Python + FastAPI', 'Full Stack', 'UI / UX Design', 'GST Management', 'Accounting']]
             ]
             db.executemany('INSERT INTO content(kind,data,created_at) VALUES(?,?,?)', [(kind, json.dumps(data), datetime.now().isoformat(timespec='seconds')) for kind, data in default_content])
-        for row in db.execute("SELECT data FROM content WHERE kind = 'certificates'"):
-            certificate = json.loads(row['data'])
-            if all(certificate.get(key) for key in ('number', 'candidate', 'category', 'duration', 'issue_date')):
-                db.execute('INSERT INTO certificates(number,candidate,category,duration,issue_date,image) VALUES(?,?,?,?,?,?) ON CONFLICT (number) DO UPDATE SET candidate = EXCLUDED.candidate, category = EXCLUDED.category, duration = EXCLUDED.duration, issue_date = EXCLUDED.issue_date, image = COALESCE(EXCLUDED.image, certificates.image)', (certificate['number'], certificate['candidate'], certificate['category'], certificate['duration'], certificate['issue_date'], certificate.get('image')))
-        db.commit()
 
 def content_rows(kind):
-    with connection() as db:
+    with connection('content') as db:
         return [{'id': row['id'], **json.loads(row['data'])} for row in db.execute('SELECT id, data FROM content WHERE kind = ? ORDER BY id', (kind,))]
 
 def admin_is_authenticated(token):
@@ -141,7 +161,7 @@ def valid_image_url(value):
 def startup(): init_db()
 
 @app.get('/api/health')
-def health(): return {'status': 'ok', 'local_only': True}
+def health(): return {'status': 'ok', 'database_layout': 'separate'}
 
 @app.get('/api/content/{kind}')
 def get_content(kind: str):
@@ -149,7 +169,7 @@ def get_content(kind: str):
 
 @app.get('/api/inquiry-fields')
 def get_inquiry_fields():
-    with connection() as db:
+    with connection('inquiries') as db:
         return [{**dict(row), 'options': json.loads(row['options'] or '[]')} for row in db.execute('SELECT id, label, field_name, field_type, required, options FROM inquiry_fields ORDER BY id')]
 
 @app.get('/api/service-options')
@@ -164,7 +184,7 @@ def add_service_option(title: str = Form(...), authorization: str | None = Heade
     clean_title = title.strip()
     if not clean_title:
         return {'detail': 'Option name is required'}
-    with connection() as db:
+    with connection('content') as db:
         existing = next((item for item in db.execute('SELECT id, data FROM content WHERE kind = ?', ('service_option',)) if json.loads(item['data']).get('title') == clean_title), None)
         if existing:
             return {'detail': 'This option already exists'}
@@ -176,7 +196,7 @@ def add_service_option(title: str = Form(...), authorization: str | None = Heade
 def delete_service_option(option_id: int, authorization: str | None = Header(default=None)):
     if not admin_is_authenticated(authenticated_token(authorization)):
         return {'detail': 'Admin login required'}
-    with connection() as db:
+    with connection('content') as db:
         db.execute('DELETE FROM content WHERE id = ? AND kind = ?', (option_id, 'service_option'))
         db.commit()
     return {'deleted': option_id}
@@ -199,7 +219,7 @@ def add_inquiry_field(label: str = Form(...), field_type: str = Form('text'), re
     if not field_name:
         return {'detail': 'Field label is required'}
     try:
-        with connection() as db:
+        with connection('inquiries') as db:
             safe_type = field_type if field_type in {'text', 'email', 'number', 'date', 'textarea', 'multi_option'} else 'text'
             parsed_options = [option.strip() for option in options.split(',') if option.strip()] if safe_type == 'multi_option' else []
             if safe_type == 'multi_option' and not parsed_options:
@@ -214,7 +234,7 @@ def add_inquiry_field(label: str = Form(...), field_type: str = Form('text'), re
 def delete_inquiry_field(field_id: int, authorization: str | None = Header(default=None)):
     if not admin_is_authenticated(authenticated_token(authorization)):
         return {'detail': 'Admin login required'}
-    with connection() as db:
+    with connection('inquiries') as db:
         db.execute('DELETE FROM inquiry_fields WHERE id = ?', (field_id,))
         db.commit()
     return {'deleted': field_id}
@@ -231,7 +251,7 @@ async def upload_background_video(video: UploadFile = File(...), authorization: 
         return {'detail': 'Video must be smaller than 100 MB'}
     (UPLOADS / safe_name).write_bytes(content)
     video_path = f'/uploads/{safe_name}'
-    with connection() as db:
+    with connection('content') as db:
         db.execute('DELETE FROM content WHERE kind = ?', ('background_video',))
         db.execute('INSERT INTO content(kind,data,created_at) VALUES(?,?,?)', ('background_video', json.dumps({'video': video_path, 'name': safe_name}), datetime.now().isoformat(timespec='seconds')))
         db.commit()
@@ -250,7 +270,7 @@ async def create_inquiry(request: Request, name: str = Form(...), email: str = F
         attachment_name = safe_name
     form_data = await request.form()
     reserved = {'name', 'email', 'country_code', 'mobile_number', 'service', 'details', 'attachment'}
-    with connection() as field_db:
+    with connection('inquiries') as field_db:
         multi_field_names = {row['field_name'] for row in field_db.execute("SELECT field_name FROM inquiry_fields WHERE field_type = 'multi_option'")}
     extra_fields = {}
     for key, value in form_data.multi_items():
@@ -260,7 +280,7 @@ async def create_inquiry(request: Request, name: str = Form(...), email: str = F
             extra_fields.setdefault(key, []).append(str(value))
         else:
             extra_fields[key] = str(value)
-    with connection() as db:
+    with connection('inquiries') as db:
         extra_fields['mobile_number'] = f'{country_code}{mobile_number.strip()}'
         cursor = db.execute('INSERT INTO inquiries(name,email,service,details,extra_fields,created_at) VALUES(?,?,?,?,?,?)', (name,email,service,details,json.dumps(extra_fields),datetime.now().isoformat(timespec='seconds')))
         db.commit()
@@ -271,13 +291,13 @@ def list_inquiries(authorization: str | None = Header(default=None)):
     token = authorization.removeprefix('Bearer ').strip() if authorization else None
     if not admin_is_authenticated(token):
         return {'detail': 'Admin login required'}
-    with connection() as db: return [dict(row) for row in db.execute('SELECT * FROM inquiries ORDER BY id DESC')]
+    with connection('inquiries') as db: return [dict(row) for row in db.execute('SELECT * FROM inquiries ORDER BY id DESC')]
 
 @app.delete('/api/inquiries/{inquiry_id}')
 def delete_inquiry(inquiry_id: int, authorization: str | None = Header(default=None)):
     token = authorization.removeprefix('Bearer ').strip() if authorization else None
     if not admin_is_authenticated(token): return {'detail': 'Admin login required'}
-    with connection() as db:
+    with connection('inquiries') as db:
         db.execute('DELETE FROM inquiries WHERE id = ?', (inquiry_id,))
         db.commit()
     return {'deleted': inquiry_id}
@@ -286,8 +306,17 @@ def delete_inquiry(inquiry_id: int, authorization: str | None = Header(default=N
 def admin_content(authorization: str | None = Header(default=None)):
     token = authorization.removeprefix('Bearer ').strip() if authorization else None
     if not admin_is_authenticated(token): return {'detail': 'Admin login required'}
-    with connection() as db:
-        return [{'id': row['id'], 'kind': row['kind'], **json.loads(row['data'])} for row in db.execute('SELECT id, kind, data FROM content ORDER BY id DESC')]
+    with connection('content') as db:
+        items = [{'id': row['id'], 'kind': row['kind'], **json.loads(row['data'])} for row in db.execute('SELECT id, kind, data FROM content WHERE kind != ? ORDER BY id DESC', ('certificates',))]
+    with connection('certificates') as db:
+        items.extend({
+            'id': row['id'], 'kind': 'certificates', 'title': row['category'],
+            'text': row['duration'],
+            'candidate': row['candidate'], 'category': row['category'],
+            'duration': row['duration'], 'issue_date': row['issue_date'],
+            'number': row['number'], 'image': row['image']
+        } for row in db.execute('SELECT id, candidate, category, duration, issue_date, number, image FROM certificates ORDER BY id DESC'))
+    return items
 
 @app.post('/api/admin/content')
 async def add_content(kind: str = Form(...), title: str = Form(''), name: str = Form(''), text: str = Form(''), content_type: str = Form(''), result: str = Form(''), color: str = Form('coral'), icon: str = Form(''), tags: str = Form(''), quote: str = Form(''), role: str = Form(''), candidate: str = Form(''), category: str = Form(''), duration: str = Form(''), issue_date: str = Form(''), number: str = Form(''), image_url: str = Form(''), image: UploadFile | None = File(None), authorization: str | None = Header(default=None)):
@@ -316,23 +345,30 @@ async def add_content(kind: str = Form(...), title: str = Form(''), name: str = 
         return {'detail': 'A title, name, or candidate is required'}
     if kind == 'certificates' and not all(parsed.get(key) for key in ('number', 'candidate', 'category', 'duration', 'issue_date')):
         return {'detail': 'Candidate, certificate number, category, duration, and issue date are required'}
-    with connection() as db:
+    if kind == 'certificates':
+        try:
+            with connection('certificates') as db:
+                cursor = db.execute('INSERT INTO certificates(number,candidate,category,duration,issue_date,image) VALUES(?,?,?,?,?,?)', (parsed['number'], parsed['candidate'], parsed['category'], parsed['duration'], parsed['issue_date'], parsed.get('image')))
+                db.commit()
+        except errors.UniqueViolation:
+            return {'detail': 'A certificate with this number already exists'}
+        return {'id': cursor.lastrowid, 'kind': kind, **parsed}
+    with connection('content') as db:
         cursor = db.execute('INSERT INTO content(kind,data,created_at) VALUES(?,?,?)', (kind, json.dumps(parsed), datetime.now().isoformat(timespec='seconds')))
-        if kind == 'certificates':
-            db.execute('INSERT INTO certificates(number,candidate,category,duration,issue_date,image) VALUES(?,?,?,?,?,?) ON CONFLICT (number) DO UPDATE SET candidate = EXCLUDED.candidate, category = EXCLUDED.category, duration = EXCLUDED.duration, issue_date = EXCLUDED.issue_date, image = EXCLUDED.image', (parsed['number'], parsed['candidate'], parsed['category'], parsed['duration'], parsed['issue_date'], parsed.get('image')))
         db.commit()
         return {'id': cursor.lastrowid, 'kind': kind, **parsed}
 
 @app.delete('/api/admin/content/{content_id}')
-def delete_content(content_id: int, authorization: str | None = Header(default=None)):
+def delete_content(content_id: int, kind: str = Query(...), authorization: str | None = Header(default=None)):
     token = authorization.removeprefix('Bearer ').strip() if authorization else None
     if not admin_is_authenticated(token): return {'detail': 'Admin login required'}
-    with connection() as db:
-        existing = db.execute('SELECT kind, data FROM content WHERE id = ?', (content_id,)).fetchone()
+    if kind == 'certificates':
+        with connection('certificates') as db:
+            db.execute('DELETE FROM certificates WHERE id = ?', (content_id,))
+            db.commit()
+        return {'deleted': content_id}
+    with connection('content') as db:
         db.execute('DELETE FROM content WHERE id = ?', (content_id,))
-        if existing and existing['kind'] == 'certificates':
-            certificate = json.loads(existing['data'])
-            db.execute('DELETE FROM certificates WHERE number = ?', (certificate.get('number'),))
         db.commit()
     return {'deleted': content_id}
 
@@ -353,7 +389,27 @@ async def update_content(content_id: int, kind: str = Form(...), title: str = Fo
     image_url = image_url.strip()
     if image_url and not valid_image_url(image_url):
         return {'detail': 'Image URL must use HTTP or HTTPS'}
-    with connection() as db:
+    if kind == 'certificates' and not all(parsed.get(key) for key in ('number', 'candidate', 'category', 'duration', 'issue_date')):
+        return {'detail': 'Candidate, certificate number, category, duration, and issue date are required'}
+    if kind == 'certificates':
+        try:
+            with connection('certificates') as db:
+                existing = db.execute('SELECT image FROM certificates WHERE id = ?', (content_id,)).fetchone()
+                if not existing: return {'detail': 'Content not found'}
+                if image and image.filename:
+                    safe_name = Path(image.filename).name
+                    (UPLOADS / safe_name).write_bytes(await image.read())
+                    parsed['image'] = f'/uploads/{safe_name}'
+                elif image_url:
+                    parsed['image'] = image_url
+                elif existing['image']:
+                    parsed['image'] = existing['image']
+                db.execute('UPDATE certificates SET number = ?, candidate = ?, category = ?, duration = ?, issue_date = ?, image = ? WHERE id = ?', (parsed['number'], parsed['candidate'], parsed['category'], parsed['duration'], parsed['issue_date'], parsed.get('image'), content_id))
+                db.commit()
+        except errors.UniqueViolation:
+            return {'detail': 'A certificate with this number already exists'}
+        return {'id': content_id, 'kind': kind, **parsed}
+    with connection('content') as db:
         existing = db.execute('SELECT data FROM content WHERE id = ?', (content_id,)).fetchone()
         if not existing: return {'detail': 'Content not found'}
         previous = json.loads(existing['data'])
@@ -365,13 +421,7 @@ async def update_content(content_id: int, kind: str = Form(...), title: str = Fo
             parsed['image'] = image_url
         elif previous.get('image'):
             parsed['image'] = previous['image']
-        if kind == 'certificates' and not all(parsed.get(key) for key in ('number', 'candidate', 'category', 'duration', 'issue_date')):
-            return {'detail': 'Candidate, certificate number, category, duration, and issue date are required'}
         db.execute('UPDATE content SET kind = ?, data = ? WHERE id = ?', (kind, json.dumps(parsed), content_id))
-        if previous.get('number') or kind == 'certificates':
-            db.execute('DELETE FROM certificates WHERE number = ?', (previous.get('number'),))
-        if kind == 'certificates':
-            db.execute('INSERT INTO certificates(number,candidate,category,duration,issue_date,image) VALUES(?,?,?,?,?,?) ON CONFLICT (number) DO UPDATE SET candidate = EXCLUDED.candidate, category = EXCLUDED.category, duration = EXCLUDED.duration, issue_date = EXCLUDED.issue_date, image = EXCLUDED.image', (parsed['number'], parsed['candidate'], parsed['category'], parsed['duration'], parsed['issue_date'], parsed.get('image')))
         db.commit()
     return {'id': content_id, 'kind': kind, **parsed}
 
@@ -381,23 +431,16 @@ async def apply_internship(name: str = Form(...), email: str = Form(...), catego
     if resume and resume.filename:
         resume_name = Path(resume.filename).name
         (UPLOADS / resume_name).write_bytes(await resume.read())
-    with connection() as db:
+    with connection('applications') as db:
         cursor = db.execute('INSERT INTO internship_applications(name,email,category,resume,created_at) VALUES(?,?,?,?,?)', (name,email,category,resume_name,datetime.now().isoformat(timespec='seconds')))
         db.commit()
         return {'id': cursor.lastrowid, 'status': 'pending'}
 
 def find_certificate(number: str):
     normalized_number = re.sub(r'[\s-]+', '', number).upper()
-    with connection() as db:
+    with connection('certificates') as db:
         row = db.execute("SELECT * FROM certificates WHERE REPLACE(REPLACE(UPPER(number), ' ', ''), '-', '') = ?", (normalized_number,)).fetchone()
-        if row:
-            return dict(row)
-        for content_row in db.execute("SELECT id, data FROM content WHERE kind = 'certificates' ORDER BY id DESC"):
-            certificate = json.loads(content_row['data'])
-            stored_number = re.sub(r'[\s-]+', '', str(certificate.get('number', ''))).upper()
-            if stored_number == normalized_number:
-                return {'id': content_row['id'], **certificate}
-    return None
+        return dict(row) if row else None
 
 @app.get('/api/certificates/{number}')
 def verify_certificate(number: str):
@@ -417,5 +460,10 @@ def download_certificate(number: str):
 
 @app.get('/api/analytics')
 def analytics():
-    with connection() as db:
-        return {'leads': db.execute('SELECT COUNT(*) AS count FROM inquiries').fetchone()['count'], 'interns': db.execute('SELECT COUNT(*) AS count FROM internship_applications').fetchone()['count'], 'certificates': db.execute('SELECT COUNT(*) AS count FROM certificates').fetchone()['count'], 'projects': 3, 'testimonials': 2}
+    with connection('inquiries') as db:
+        leads = db.execute('SELECT COUNT(*) AS count FROM inquiries').fetchone()['count']
+    with connection('applications') as db:
+        interns = db.execute('SELECT COUNT(*) AS count FROM internship_applications').fetchone()['count']
+    with connection('certificates') as db:
+        certificates = db.execute('SELECT COUNT(*) AS count FROM certificates').fetchone()['count']
+    return {'leads': leads, 'interns': interns, 'certificates': certificates, 'projects': 3, 'testimonials': 2}
