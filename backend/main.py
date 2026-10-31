@@ -4,6 +4,7 @@ import secrets
 import os
 from pathlib import Path
 import re
+from urllib.parse import urlsplit
 from fastapi import FastAPI, Form, Header, Request, UploadFile, File
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -128,6 +129,13 @@ def admin_is_authenticated(token):
 
 def authenticated_token(authorization):
     return authorization.removeprefix('Bearer ').strip() if authorization else None
+
+def valid_image_url(value):
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    return parsed.scheme in ('http', 'https') and bool(parsed.netloc)
 
 @app.on_event('startup')
 def startup(): init_db()
@@ -282,7 +290,7 @@ def admin_content(authorization: str | None = Header(default=None)):
         return [{'id': row['id'], 'kind': row['kind'], **json.loads(row['data'])} for row in db.execute('SELECT id, kind, data FROM content ORDER BY id DESC')]
 
 @app.post('/api/admin/content')
-async def add_content(kind: str = Form(...), title: str = Form(''), name: str = Form(''), text: str = Form(''), content_type: str = Form(''), result: str = Form(''), color: str = Form('coral'), icon: str = Form(''), tags: str = Form(''), quote: str = Form(''), role: str = Form(''), candidate: str = Form(''), category: str = Form(''), duration: str = Form(''), issue_date: str = Form(''), number: str = Form(''), image: UploadFile | None = File(None), authorization: str | None = Header(default=None)):
+async def add_content(kind: str = Form(...), title: str = Form(''), name: str = Form(''), text: str = Form(''), content_type: str = Form(''), result: str = Form(''), color: str = Form('coral'), icon: str = Form(''), tags: str = Form(''), quote: str = Form(''), role: str = Form(''), candidate: str = Form(''), category: str = Form(''), duration: str = Form(''), issue_date: str = Form(''), number: str = Form(''), image_url: str = Form(''), image: UploadFile | None = File(None), authorization: str | None = Header(default=None)):
     token = authorization.removeprefix('Bearer ').strip() if authorization else None
     if not admin_is_authenticated(token): return {'detail': 'Admin login required'}
     parsed = {key: value for key, value in {
@@ -295,10 +303,15 @@ async def add_content(kind: str = Form(...), title: str = Form(''), name: str = 
         parsed['category'] = parsed.get('category') or parsed.get('title') or 'Certificate'
         parsed['duration'] = parsed.get('duration') or parsed.get('text') or 'Not specified'
         parsed['issue_date'] = parsed.get('issue_date') or datetime.now().date().isoformat()
+    image_url = image_url.strip()
+    if image_url and not valid_image_url(image_url):
+        return {'detail': 'Image URL must use HTTP or HTTPS'}
     if image and image.filename:
         safe_name = Path(image.filename).name
         (UPLOADS / safe_name).write_bytes(await image.read())
         parsed['image'] = f'/uploads/{safe_name}'
+    elif image_url:
+        parsed['image'] = image_url
     if not parsed.get('title') and not parsed.get('name') and not parsed.get('candidate'):
         return {'detail': 'A title, name, or candidate is required'}
     if kind == 'certificates' and not all(parsed.get(key) for key in ('number', 'candidate', 'category', 'duration', 'issue_date')):
@@ -324,7 +337,7 @@ def delete_content(content_id: int, authorization: str | None = Header(default=N
     return {'deleted': content_id}
 
 @app.put('/api/admin/content/{content_id}')
-async def update_content(content_id: int, kind: str = Form(...), title: str = Form(''), name: str = Form(''), text: str = Form(''), content_type: str = Form(''), result: str = Form(''), color: str = Form('coral'), icon: str = Form(''), tags: str = Form(''), quote: str = Form(''), role: str = Form(''), candidate: str = Form(''), category: str = Form(''), duration: str = Form(''), issue_date: str = Form(''), number: str = Form(''), image: UploadFile | None = File(None), authorization: str | None = Header(default=None)):
+async def update_content(content_id: int, kind: str = Form(...), title: str = Form(''), name: str = Form(''), text: str = Form(''), content_type: str = Form(''), result: str = Form(''), color: str = Form('coral'), icon: str = Form(''), tags: str = Form(''), quote: str = Form(''), role: str = Form(''), candidate: str = Form(''), category: str = Form(''), duration: str = Form(''), issue_date: str = Form(''), number: str = Form(''), image_url: str = Form(''), image: UploadFile | None = File(None), authorization: str | None = Header(default=None)):
     token = authorization.removeprefix('Bearer ').strip() if authorization else None
     if not admin_is_authenticated(token): return {'detail': 'Admin login required'}
     parsed = {key: value for key, value in {
@@ -337,6 +350,9 @@ async def update_content(content_id: int, kind: str = Form(...), title: str = Fo
         parsed['category'] = parsed.get('category') or parsed.get('title') or 'Certificate'
         parsed['duration'] = parsed.get('duration') or parsed.get('text') or 'Not specified'
         parsed['issue_date'] = parsed.get('issue_date') or datetime.now().date().isoformat()
+    image_url = image_url.strip()
+    if image_url and not valid_image_url(image_url):
+        return {'detail': 'Image URL must use HTTP or HTTPS'}
     with connection() as db:
         existing = db.execute('SELECT data FROM content WHERE id = ?', (content_id,)).fetchone()
         if not existing: return {'detail': 'Content not found'}
@@ -345,6 +361,8 @@ async def update_content(content_id: int, kind: str = Form(...), title: str = Fo
             safe_name = Path(image.filename).name
             (UPLOADS / safe_name).write_bytes(await image.read())
             parsed['image'] = f'/uploads/{safe_name}'
+        elif image_url:
+            parsed['image'] = image_url
         elif previous.get('image'):
             parsed['image'] = previous['image']
         if kind == 'certificates' and not all(parsed.get(key) for key in ('number', 'candidate', 'category', 'duration', 'issue_date')):

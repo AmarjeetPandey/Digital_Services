@@ -1,0 +1,43 @@
+.projectArt .contentImage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.serviceImage {
+  width: 100%;
+  max-width: 180px;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+
+.serviceRow.withImage {
+  grid-template-columns: minmax(120px, 180px) 1fr 120px;
+}
+
+@media (max-width: 800px) {
+  .serviceRow.withImage {
+    grid-template-columns: minmax(75px, 30vw) 1fr;
+  }
+
+  .serviceRow.withImage button {
+    grid-column: 2;
+  }
+}
+
+.internshipImage {
+  display: block;
+  width: 100%;
+  height: 160px;
+  margin-bottom: 20px;
+  object-fit: cover;
+}
+
+.certificateImage {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 20px 0;
+}
